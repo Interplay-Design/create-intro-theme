@@ -1,0 +1,238 @@
+#!/bin/bash
+
+# Check if wp-cli is installed
+if ! command -v wp &> /dev/null; then
+  echo "Error: wp-cli is required but not found. Please install wp-cli and try again."
+  exit 1
+fi
+
+# Find the WordPress installation directory
+wp_dir=$(wp eval 'echo ABSPATH;')
+
+# Check if jq is installed
+if ! command -v jq &> /dev/null; then
+  echo "Error: jq is required but not found. Please install jq using the appropriate package manager:"
+  echo "For macOS (using brew):"
+  echo "brew install jq"
+  echo ""
+  echo "For Ubuntu (using apt):"
+  echo "sudo apt install jq"
+  exit 1
+fi
+
+# Prompt for child theme name
+read -p "Enter the child theme name: " child_theme_name
+
+# Generate the child theme slug
+child_theme_slug=$(echo "$child_theme_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^[:alnum:]]/-/g' | sed 's/^-//;s/-$//')
+
+# Check if the child theme folder already exists
+if [ -d "$wp_dir/wp-content/themes/$child_theme_slug" ]; then
+  echo "Child theme '$child_theme_slug' already exists. Skipping child theme creation."
+else
+  # Prompt for optional information
+  read -p "Enter the parent theme (default: intro): " parent_theme
+  parent_theme=${parent_theme:-intro}
+
+  read -p "Enter the theme URI (default: interplaycreative.com): " theme_uri
+  theme_uri=${theme_uri:-interplaycreative.com}
+
+  read -p "Enter the description (default: $child_theme_name child theme for the Intro theme.): " description
+  description=${description:-$child_theme_name child theme for the Intro theme.}
+
+  read -p "Enter the author (default: Interplay Design Inc): " author
+  author=${author:-Interplay Design Inc}
+
+  read -p "Enter the author URI (default: interplaycreative.com): " author_uri
+  author_uri=${author_uri:-interplaycreative.com}
+
+  read -p "Enter the version number (default: 1.0.0): " version
+  version=${version:-1.0.0}
+
+  # Create the child theme folder
+  wp theme install "$parent_theme" --activate --path="$wp_dir"
+  wp scaffold child-theme "$child_theme_slug" --parent_theme="$parent_theme" --path="$wp_dir"
+
+  # Create the sass folder and style.scss file
+  mkdir "$wp_dir/wp-content/themes/$child_theme_slug/sass"
+  cat << EOF > "$wp_dir/wp-content/themes/$child_theme_slug/sass/style.scss"
+/*
+Theme Name: $child_theme_name Child Theme
+Theme URI: $theme_uri
+Description: $description
+Author: $author
+Author URI: $author_uri
+Template: $parent_theme
+Version: $version
+*/
+
+/* Add your custom styles below */
+EOF
+fi
+
+# Execute npm init and install node-sass and npm-run-all
+cd "$wp_dir/wp-content/themes/$child_theme_slug"
+npm init -y
+npm install node-sass npm-run-all --save-dev
+
+# Update package.json scripts
+jq '.scripts += {
+  "build-sass": "node-sass --output-style compressed sass/style.scss style.css",
+  "watch-sass": "node-sass --watch --output-style compressed sass/style.scss style.css"
+}' package.json > temp.json && mv temp.json package.json
+
+# Create a theme.json file if it doesn't exist already
+if [ ! -f "theme.json" ]; then
+  cp "$wp_dir/wp-content/themes/$parent_theme/theme.json" "theme.json"
+fi
+
+# Prompt to activate the child theme
+if [ -d "$wp_dir/wp-content/themes/$child_theme_slug" ]; then
+  child_theme_status=$(wp theme status "$child_theme_slug" --path="$wp_dir" | grep "Status:" | awk '{print $2}')
+  if [[ $child_theme_status == "Active" ]]; then
+    echo "Child theme '$child_theme_slug' is already activated."
+  else
+    read -p "Do you want to activate the child theme? (y/n): " activate_theme
+    if [[ $activate_theme =~ ^[Yy]$ ]]; then
+      wp theme activate "$child_theme_slug" --path="$wp_dir"
+    fi
+  fi
+fi
+
+
+
+
+# Set fg_color and bg_color
+fg_color="#444444"
+bg_color="#f1f1f1"
+theme_colors=$(jq -r '.settings.color.palette[] | select(.slug and .color and .name)' theme.json)
+fg_color_entry=$(echo "$theme_colors" | jq -r 'select(.slug == "foreground") | .color')
+bg_color_entry=$(echo "$theme_colors" | jq -r 'select(.slug == "background") | .color')
+if [ -n "$fg_color_entry" ]; then
+  fg_color=$fg_color_entry
+fi
+if [ -n "$bg_color_entry" ]; then
+  bg_color=$bg_color_entry
+fi
+
+# Declare global variables for slug_fg_color and slug_bg_color
+slug_fg_color=''
+slug_bg_color=''
+
+# Function to check if a string is a valid hex color code
+is_valid_hex() {
+  [[ $1 =~ ^#[A-Fa-f0-9]{6}$ ]]
+}
+
+# Function to update the theme.json file with a new color value
+update_theme_color() {
+  local color_name="$1"
+  local new_color="$2"
+
+  jq --arg name "$color_name" --arg color "$new_color" '.settings.color.palette |= map(if .name == $name then .color = $color else . end)' theme.json > temp.json && mv temp.json theme.json
+
+  # Update fg_color and bg_color variables
+  if [ "$color_name" = "Foreground" ]; then
+    fg_color=$new_color
+  elif [ "$color_name" = "Background" ]; then
+    bg_color=$new_color
+  fi
+
+  # Update slug_fg_color and slug_bg_color if the updated color is Foreground or Background
+  if [ "$color_name" = "Foreground" ]; then
+    slug_fg_color=$(printf "\033[38;2;%d;%d;%dm" "0x${new_color:1:2}" "0x${new_color:3:2}" "0x${new_color:5:2}")
+  elif [ "$color_name" = "Background" ]; then
+    slug_bg_color=$(printf "\033[48;2;%d;%d;%dm" "0x${new_color:1:2}" "0x${new_color:3:2}" "0x${new_color:5:2}")
+  fi
+}
+
+# Function to prompt for color change
+prompt_for_color_change() {
+  # Prompt for the color number to change
+  read -p "Which color do you wish to change (use the number in the first column)? " color_number
+
+  # Check if the provided color number is valid
+  if [[ $color_number =~ ^[0-9]+$ ]]; then
+    # Get the corresponding color name based on the color number
+    color_name=$(jq -r --argjson num "$color_number" '.settings.color.palette[$num - 1] | .name' theme.json)
+
+    # Prompt for the new hex value
+    read -p "Which hex value do you wish to change '$color_name' to? " new_hex
+
+    # Validate the hex value
+    if is_valid_hex "$new_hex"; then
+      # Update the theme.json file with the new color value
+      update_theme_color "$color_name" "$new_hex"
+
+      # Display the updated palette colors and names
+      display_palette_colors
+
+      # Restart the prompt sequence
+      change_palette_prompt
+    else
+      echo "Please input a valid hex code."
+      prompt_for_color_change
+    fi
+  else
+    echo "Please input a number from the first column, beside the 'Color Name' column."
+    prompt_for_color_change
+  fi
+}
+
+# Function to display the current palette colors and names
+display_palette_colors() {
+  echo "Current Palette Colors and Names:"
+  printf '\033[0m%-4s | %-20s | %-15s | %-15s | %-10s\033[0m\n' "#" "Color Name" "FG on Color" "BG on Color" "Hex Value"
+  echo -e "\033[1m$(printf '%.s-' {1..6})+$(printf '%.s-' {1..21})+$(printf '%.s-' {1..17})+$(printf '%.s-' {1..17})+$(printf '%.s-' {1..11})"
+
+  jq -r '.settings.color.palette[] | select(.slug and .color and .name) | "\(.name)\t\(.color)"' theme.json |
+    awk -F'\t' -v fg_color="$fg_color" -v bg_color="$bg_color" '
+      BEGIN { count = 1 }
+      {
+        slug_cell_bg_color = sprintf("\033[48;2;%d;%d;%dm", "0x" substr($2, 2, 2), "0x" substr($2, 4, 2), "0x" substr($2, 6, 2));
+        slug_fg_color = sprintf("\033[38;2;%d;%d;%dm", "0x" substr(fg_color, 2, 2), "0x" substr(fg_color, 4, 2), "0x" substr(fg_color, 6, 2));
+        slug_bg_color = sprintf("\033[48;2;%d;%d;%dm", "0x" substr(bg_color, 2, 2), "0x" substr(bg_color, 4, 2), "0x" substr(bg_color, 6, 2));
+        reset_color = "\033[0m";
+        printf("%s%-4d%s | ", reset_color, count++, reset_color);
+        printf("%s%-20s%s | ", reset_color, $1, reset_color);
+        printf("%s%-15s%s | ", slug_fg_color slug_cell_bg_color, "  Foreground   ", reset_color);
+        printf("%s%-15s%s | ", slug_bg_color slug_cell_bg_color, "  Background   ", reset_color);
+        printf("%s%-10s%s\n", reset_color, $2, reset_color);
+      }' | sed 's/+/\+--/'
+
+  site_url=$(wp eval 'echo home_url();')  # Retrieve site URL using wp-cli
+
+  echo -e "\nNOTE: You can view your theme changes here $site_url"
+}
+
+# Function to prompt for changing the palette colors
+change_palette_prompt() {
+  # Retrieve the hex color with slug "background" or set a fallback color
+  background_color=$(jq -r '.settings.color.palette[] | select(.slug == "background") | .color' theme.json)
+  background_color=${background_color:-'#ffffff'}
+
+  # Retrieve the hex color with slug "foreground" or set a fallback color
+  text_color=$(jq -r '.settings.color.palette[] | select(.slug == "foreground") | .color' theme.json)
+  text_color=${text_color:-'#323232'}
+
+  # Prompt to change palette colors with colored prompt
+  printf '\033[48;2;%d;%d;%dm\033[38;2;%d;%d;%dm' \
+    0x${background_color:1:2} 0x${background_color:3:2} 0x${background_color:5:2} \
+    0x${text_color:1:2} 0x${text_color:3:2} 0x${text_color:5:2}
+  read -p "Do you want to change the palette colors? (y/n): " change_palette
+  printf '\033[0m'
+
+  if [[ $change_palette =~ ^[Yy]$ ]]; then
+    prompt_for_color_change
+  fi
+}
+
+# Display current palette colors and names
+printf '\033[0m%-4s | %-20s | %-15s | %-15s | %-10s\033[0m\n' "#" "Color Name" "FG on Color" "BG on Color" "Hex Value"
+echo -e "\033[1m$(printf '%.s-' {1..6})+$(printf '%.s-' {1..21})+$(printf '%.s-' {1..17})+$(printf '%.s-' {1..17})+$(printf '%.s-' {1..11})"
+
+# Display the initial palette colors and names
+display_palette_colors
+
+# Prompt to change palette colors
+change_palette_prompt
